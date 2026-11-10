@@ -1,0 +1,34 @@
+# ROS 2 / colcon build products
+build/
+install/
+log/
+**/build/
+**/install/
+**/log/
+**/__pycache__/
+*.py[cod]
+
+# ROS 2 local state
+.ros/
+
+# ESP-IDF generated output and local configuration
+build/
+managed_components/**/build/
+managed_components/**/install/
+managed_components/**/log/
+sdkconfig
+sdkconfig.old
+
+# IDE and OS files
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+Desktop.ini
+
+# Local credentials
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
