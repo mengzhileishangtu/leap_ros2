@@ -1,199 +1,143 @@
-# 从零读懂 leap_ros_mcu_driver
+# 在 Windows 上从零读懂 leap_ros_mcu_driver
 
-适用于 Ubuntu 24.04、VS Code 和 ESP32-S3 小车项目。源码以 `main` 分支的 v2.2、提交 `806d2fa` 为准。主线可以在电脑上学完。建议一次留 20～40 分钟；第一次完成阶段 0 和阶段 1 的直行例子就够了。[本路线对应的源码](https://github.com/czu963889306-dev/leap_ros_mcu_driver/tree/806d2fa02de9085c8ef413f59dc9e421c88d51f5)
+这是一份源码导读。打开一个代码片段，弄清它负责什么、谁调用它、数据接下来去哪，再顺着链接读下一段。整条路线只用 Windows 上的 VS Code 或浏览器。固件源码固定在 `806d2fa`，配套上位机固定在 `8043c44`，文中的行号对应这两个版本。
 
-## 你最后要能讲清什么
+## 从哪儿打开
 
-假设电脑发出“以 0.2 m/s 前进，同时向左转”的指令。读完后，你应该能打开源码，指出**哪个函数收到了指令、谁计算左右轮目标、谁知道轮子实际转了多快、谁把结果发回电脑**。然后换一个没讲过的传感器，自己追出它的采集和发布路径。
+- **仓库已在电脑上**：在 VS Code 选“文件 → 打开文件夹”，打开同时包含 `main` 和 `components` 的那层目录。按 `Ctrl+P` 输入相对路径，例如 `main/app_main.cpp:3`，可直接跳到第 3 行。按 `Ctrl+Shift+F` 搜函数名能找到谁用过它。
+- **仓库还没下载**：直接点本指南里的源码链接，浏览器会高亮本次要看的几行。也可以下载对应版本的 ZIP，解压后用 VS Code 打开。[固件源码 ZIP](https://github.com/czu963889306-dev/leap_ros_mcu_driver/archive/806d2fa02de9085c8ef413f59dc9e421c88d51f5.zip)
+- **阅读节奏**：一天读一个小片段也可以。每节末尾有一个“可以继续”的判断，只需能用自己的话回答。初次阅读把 `tests/`、`managed_components/`、运动学公式和 PID 推导留到以后。碰到宏或底层库函数，先弄清它在眼前这一行起什么作用。
 
-| 进度 | 这次解决的问题 | 留下一个能检查的结果 |
+## 先认清这三个地方
+
+| 地方 | 在整套系统里做什么 | 你会看到的名字 |
 |---|---|---|
-| □ 0　打开工程 | 哪些代码在电脑上跑，哪些在板子上跑？ | 打开仓库，找到两个入口 |
-| □ 1　运动学 | 同一个“左转”，两个轮子各转多少？ | 手算轮速，运行第一个测试 |
-| □ 2　启动与任务 | ESP32 开机后，谁让控制和采集同时进行？ | 标出一个任务和它使用的队列 |
-| □ 3　接收命令 | 电脑发出的速度怎样到达控制器？ | 追出 `linear.x` 的值和单位 |
-| □ 4　驱动电机 | 怎么知道车轮达到了目标转速？ | 画出一只轮子的反馈回路 |
-| □ 5　读回里程计 | 电脑上的位置和速度从哪里来？ | 解释轮子空转时里程计会怎样 |
-| □ 6　独立追外设 | 一个距离读数怎样变成 ROS 话题？ | 独立追完超声波，再任选一项拓展 |
-| □ 7　复盘与迁移 | 换一台车，哪些假设需要重新验证？ | 写出一个故障的排查顺序和移植清单 |
+| 你的 Windows 电脑 | 打开并阅读两端的源文件 | VS Code、GitHub |
+| 车上的 ESP32-S3 | 运行烧进芯片的程序，也就是固件。ESP-IDF 提供开发框架，FreeRTOS 安排板上任务运行 | `app_main`、`xTaskCreate`、GPIO、PWM |
+| 项目里的 Linux 上位机 | 运行 micro-ROS Agent 和 ROS 2 应用。Agent 把板端通信接入 ROS 2；上位机应用接收、加工或发送消息 | `main`、`rclcpp`、launch 文件 |
 
-## 阶段 0　从一个空文件夹开始
+先看 **谁在执行代码**，再看函数名。同一个“发布里程计”功能会跨越板上任务、通信链路和 Linux 程序，它们分别有自己的入口。
 
-先认识电脑和小车的分工。Ubuntu 上的程序发运动指令、接收状态。ESP32-S3 上的固件驱动电机、读编码器和传感器。运行在电脑侧的 **micro-ROS Agent** 让板上的 micro-ROS 程序接入 ROS 2。你现在读的仓库主要是板上的固件，另有少量可以在普通电脑运行的测试。
+## 第一遍的路径图
 
-**已有仓库**：直接用 VS Code 打开包含 `README.md`、`main/`、`components/` 和 `tests/` 的那一层文件夹。**第一次下载**：在 Ubuntu 终端执行下面几行，把参考源码放在独立学习目录。后续编译命令都在仓库根目录执行。
-
-```bash
-mkdir -p ~/leap-study
-cd ~/leap-study
-git clone https://github.com/czu963889306-dev/leap_ros_mcu_driver.git
-cd leap_ros_mcu_driver
-git rev-parse --short HEAD
-code .
-```
-
-如果后续版本与本文不同，文末的源码链接仍指向固定版本。已有本地修改时，也可以直接对照这些链接阅读。若终端找不到 `code`，用 VS Code 的“文件 → 打开文件夹”打开同一目录即可。
-
-第一次只打开三个文件：
-
-1. `README.md`：找出主控芯片、底盘类型、支持的两类通信协议。看到陌生的传感器型号，先留下书签。
-2. `main/app_main.cpp`：找到固件入口 `app_main()`，记下它调用的 `app_runtime_startup()`。到这里就停。
-3. `tests/differential_kinematics_test.cpp`：找到普通 C++ 的 `int main()`。下一阶段在电脑上跑的就是它。
-
-读代码时用两个动作就够了：VS Code 按 `Ctrl+P` 输入文件名，按 `Ctrl+Shift+F` 全工程搜索函数名。要找“谁调用了它”，搜索函数名并区分声明、定义和调用位置；还没配好 C++ 跳转功能也能这样读。
-
-**过关**：关掉文件后，能重新找到板子的入口，以及电脑上运动学测试的入口。能用自己的话说出两个入口各自在什么设备上运行。
-
-## 阶段 1　在电脑上跑通一件能算对的事
-
-**问题**：两轮车原地向左转时，左右轮应该同向还是反向？先在纸上画车头和两只轮子，再开代码。
-
-按顺序只看下面四处：
-
-1. 在 `tests/differential_kinematics_test.cpp` 搜 `Positive yaw`。测试给出输入，也写出了作者认为正确的左右轮输出。这里的“正角速度”表示向左转。
-2. 在 `main/control/differential_kinematics.h` 找 `Inverse` 和 `Forward`。前者由车身速度求轮速，后者由轮速反推车身速度。先把函数看成“给它什么、它算出什么”。
-3. 在同名的 `.cpp` 里读两个函数的实现。这里只要认识 `wheel_mms[0]` 是左轮，`[1]` 是右轮。调用 `Forward(wheels, &vx, &vy, &wz)` 时，三个 `&` 把变量地址交给函数，让它把结果写回来。
-4. 在 `main/config/motion_config.h` 找 `kTrackWidthMm`。两轮中心间距为 131.7 mm，所以半轮距是 65.85 mm。把它代入算式。
-
-| 车身输入 | 左轮目标 | 右轮目标 |
-|---|---:|---:|
-| 前进 200 mm/s，无转动 | 200 mm/s | 200 mm/s |
-| 不前进，向左转 2 rad/s | −131.7 mm/s | +131.7 mm/s |
-| 前进 200 mm/s，同时向左转 1 rad/s | 134.15 mm/s | 265.85 mm/s |
-
-在仓库根目录编译并运行原仓库的测试。两处 `-I` 告诉编译器去哪里找头文件，`-o` 指定输出程序的位置。如系统提示缺少 `g++`，可先运行 `sudo apt install g++`。
-
-```bash
-g++ -std=c++17 -Wall -Wextra -Werror -I main/config -I main/control \
-  tests/differential_kinematics_test.cpp main/control/differential_kinematics.cpp \
-  -o /tmp/leap_kinematics
-/tmp/leap_kinematics && echo "运动学测试通过"
-```
-
-`ExpectNear(actual, expected)` 在误差很小时通过，超出范围就触发断言。原测试成功时本身没有输出，最后一句让你能看到成功提示。
-
-**过关**：把输入改成“前进 200 mm/s、向右转 1 rad/s”，自己算一次，再对照答案：左轮 265.85 mm/s、右轮 134.15 mm/s。能解释符号为什么互换，今天就可以收工。[运动学实现](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa/main/control/differential_kinematics.cpp) · [原仓库测试](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa/tests/differential_kinematics_test.cpp)
-
-## 阶段 2　回到开机那一刻，认识任务和队列
-
-**问题**：如果运动控制和超声波采集都有一个 `while` 循环，为什么两个都能运行？
-
-1. 从 `app_main()` 进入 `main/app_runtime.cpp` 的 `app_runtime_startup()`。只标出 `board_init()`、`create_runtime_queues()` 和创建 `motion_task`、`ultrasonic_task` 的两行 `xTaskCreate(...)`。
-2. 在 `main/platform/board.cpp` 搜 `MotionController robot`。你会看到 `robot` 拿着左右电机和两个编码器。以后看到 `robot.Drive(...)`，就知道它控制哪几个硬件对象了。
-3. 打开 `main/tasks/sensors/ultrasonic_task.cpp`。这个任务反复测距，把结果写进 `ultrasonic_state`，然后等待。等待期间，FreeRTOS 可以调度其他就绪任务。再回 `create_runtime_queues()`，确认这个队列长度为 1。
-
-| 源码里遇到的操作 | 可以怎样理解 |
-|---|---|
-| `xTaskCreate` | 交给 FreeRTOS 一个任务入口，由调度器安排执行 |
-| `xQueueOverwrite` | 把单槽队列的内容更新为最新值 |
-| `xQueuePeek` | 查看当前值并保留，另一个读取者仍可查看 |
-| `xQueueReceive` | 取出队列里的消息，这条消息随即被移出 |
-
-**过关**：连续写入 30 cm、31 cm，发布任务之后才来看，能看到哪一次？答案是 31 cm。顺着 `ultrasonic_state` 搜一遍，给创建、写入、读取三个位置各加一个书签。[启动代码](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa/main/app_runtime.cpp) · [超声波任务](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa/main/tasks/sensors/ultrasonic_task.cpp)
-
-**顺手看懂工程怎样编起来**：打开根目录 `CMakeLists.txt`，找到 ESP-IDF 的工程配置和项目名；再看 `main/CMakeLists.txt` 的 `APP_SRCS` 与 `idf_component_register`，找出刚读过的两个任务文件。主机运动学测试只编两个 C++ 文件；整套固件则要把任务、硬件驱动和通信组件一起交给 ESP-IDF 构建。
-
-## 阶段 3　追一条下行命令
-
-**问题**：ROS 2 消息里的 `0.2`，在哪一行变成了固件里的 `200`？
-
-先认识三个词。**节点**是参与通信的程序实体。**话题**是一类消息使用的名字。**消息类型**规定里面有哪些字段。本项目订阅的话题叫 `/cmd_vel`，类型叫 `geometry_msgs/msg/Twist`。本例只关心前进速度 `linear.x` 和转动速度 `angular.z`。
-
-如果你的 Ubuntu 已装好 ROS 2 Jazzy，可以用两个终端体验一次。两个终端都先运行 `source /opt/ros/jazzy/setup.bash`。下面用单独的练习话题，在电脑上就能看见消息。
-
-```bash
-# 终端 A，开始监听
-ros2 topic echo /leap_study/cmd_vel geometry_msgs/msg/Twist
-
-# 终端 B，查看字段，然后发一条消息
-ros2 interface show geometry_msgs/msg/Twist
-ros2 topic pub --once /leap_study/cmd_vel geometry_msgs/msg/Twist \
-  '{linear: {x: 0.2}, angular: {z: 1.0}}'
-```
-
-在 A 中应看到 `linear.x` 为 0.2、`angular.z` 为 1.0，按 `Ctrl+C` 结束。还没安装 ROS 2 时，直接在下面的源码中跟踪这两个数，也能完成本阶段。[ROS 2 Jazzy 官方话题教程源码](https://github.com/ros2/ros2_documentation/blob/jazzy/source/Tutorials/Beginner-CLI-Tools/Understanding-ROS2-Topics/Understanding-ROS2-Topics.rst)
-
-| 打开的位置 | 只回答一个问题 |
-|---|---|
-| `main/tasks/network/microros/microros_runtime.cpp` 的 `spin_once()` | `rcl_take` 取到消息后调用了谁？ |
-| 同目录 `microros_subscribers.cpp` 的 `handle_cmd_vel()` | 哪个字段乘以 1000？结果写入哪个队列？ |
-| `main/msg/motion_msg.h` 的 `MotionMsg` | 指令字段 `target_vx` 与状态字段 `vx` 各表示什么？ |
-| `main/tasks/control/motion_task.cpp` 的 `apply_command` | `control_mode == 0` 时，送给 `robot.Drive()` 的三个量是什么？ |
-
-**过关**：关掉表格，用全文搜索从 `handle_cmd_vel` 走到 `robot.Drive`。能说出中间靠 `motion_cmd` 队列接力，线速度由 m/s 变为 mm/s，角速度保持 rad/s。[订阅函数](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa/main/tasks/network/microros/microros_subscribers.cpp) · [运动任务](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa/main/tasks/control/motion_task.cpp)
-
-## 阶段 4　只盯一只轮子，读懂速度闭环
-
-**问题**：左轮目标是 134.15 mm/s，如果地面阻力变大，哪段代码会发现轮子转慢了？
-
-这次集中在 `main/control/motion_controller.cpp`，分两次读。第一次跟目标值，第二次跟实测值。
-
-1. **跟目标值。** 从 `Drive()` 进 `CalculateKinematics()`。找到阶段 1 学过的 `kinematics_.Inverse(...)`，再找 `kMmSToRpm`。轮子的目标线速度在这里换成每分钟转数，存入 `final_target_vel_`。
-2. **跟实测值。** 打开 `Update()`，从 `GetCount()` 向下读。两次编码器计数之差除以时间得到每秒计数，再用每轮一圈的计数换算成 `raw_rpm`，经过滤波得到 `filtered_rpm_`。配置给出的标称控制周期为 20 ms。
-3. **在两条线相遇处停住。** 搜 `pid_vel_[i].Calculate`，看看它吃进的目标、实测和时间间隔。计算结果经过 `ApplyDeadband()`，最后传给 `motors_[i]->SetSpeed(final_pwm)`。PWM 是让驱动器改变电机输出的控制量。读到这里再打开 `components/pid_controller/pid_controller.cpp`，先认出 `error = setpoint - measured_value`。
-
-**算一次**：假设方向已经校正，20 ms 内多了 78 个计数，每圈 4680 个计数。原始转速是多少？`78 ÷ 0.02 ÷ 4680 × 60 = 50 RPM`。现在你能把一次编码器读数一直追到 PID 的实测输入。刚开始转动时，滤波后的数值可能低于这次的原始值。
-
-**过关**：在纸上画出“目标轮速、实测轮速、PID、PWM、电机、编码器”六项，并把实测轮速接回 PID。若需要深入某个硬件，再从 `GetCount()` 或 `SetSpeed()` 进入 `components/encoder_driver/` 或 `components/motor_driver/`。[控制器](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa/main/control/motion_controller.cpp) · [PID 实现](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa/components/pid_controller/pid_controller.cpp)
-
-## 阶段 5　反向追踪，弄明白里程计
-
-**问题**：电脑收到 `/odom`，其中的速度是怎么得来的？这次从电脑看到的结果往回找。
-
-1. 在 `microros_publishers.cpp` 找 `publish_odom()`，看它从 `motion_state` 读到什么，哪几项除以 1000。
-2. 全文搜 `queues.motion_state`，定位到 `motion_task.cpp` 中的写入位置。向上几行，找 `GetVelocity()` 和 `GetOdometry()`。
-3. 回 `motion_controller.cpp`，在 `GetVelocity()` 找 `kinematics_.Forward(...)`。这就是阶段 1 的另一个函数。再到 `Update()` 找 `odom_yaw_` 和 `pos_x_`，看车身速度怎样随时间累积成航向与位置。
-
-做一个思想实验。把驱动轮架空，假设编码器能读到两轮等速向前转。固件算出的前进里程会增加，车身在房间里的位置却没有变。这能同时解释“里程计为什么有用”和“里程计为什么会漂”。源码中的 `imu_yaw_rel_` 还用于相对转向控制；追踪这里发布的轮式航向时，看 `odom_yaw_ += local_vw * dt` 这一行。
-
-**过关**：有人问“把轮子卡住但持续发前进命令，目标值和里程计速度各会怎样？”你能引用 `target_vx`、编码器反馈和 `publish_odom()` 三处解释，区分指令与测量。[里程计计算](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa/main/control/motion_controller.cpp#L143) · [话题发布](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa/main/tasks/network/microros/microros_publishers.cpp#L95)
-
-## 阶段 6　用超声波练一次独立阅读
-
-**题目**：传感器测到 45 cm，电脑会在哪个话题、哪个字段看到多少？先自己找，遇到断点再看下面这行提示。
-
-**搜索顺序**：`GetDistanceCm` → `distance_cm` → `queues.ultrasonic_state` → `publish_ultrasonic` → `kUltrasonicTopic`。
-
-**对照答案**：采集任务把 45 存入 `UltrasonicMsg.distance_cm`。发布函数读队列、除以 100，把 0.45 写进 `sensor_msgs/msg/Range` 的 `range` 字段，通过 `/ultrasonic` 发出。读数小于等于 0 时，这个字段写入 `NaN`，表示无有效距离。它在同步时间可用时才发布。[采集端](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa/main/tasks/sensors/ultrasonic_task.cpp) · [发布端](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa/main/tasks/network/microros/microros_publishers.cpp#L175)
-
-接下来挑一个你最想弄明白的问题，自行做第二遍。以后再回来补其他分支。
-
-| 想研究的问题 | 从哪里进 | 怎样证明自己看懂了 |
+| 顺序 | 带着这个问题打开源码 | 这一步学到什么 |
 |---|---|---|
-| 松开手柄后，之前的导航指令还在吗？ | `main/tasks/io/gamepad_i2c_task.cpp` 和 `motion_task.cpp` | 给出“导航前进、手柄接管、手柄回中”三个时刻生效的指令。用当前源码核对 README 中的断连描述。 |
-| 为什么板子已经连上，但暂时收不到带时间戳的传感器数据？ | `microros_time_sync.cpp`、`publish_state_timer()`、`tests/time_sync_pro_test.cpp` | 找出首次同步前和上次成功同步超过 30 秒后，发布函数走哪条路径。 |
-| 换一种雷达，固件靠什么识别？ | `main/tasks/sensors/lidar_detection.h`、`lidar_task.cpp`、`tests/lidar_driver_test.cpp` | 先从测试找识别和掉线场景，再回代码解释有效帧数和超时分别起什么作用。 |
-| 改完速度 PID，重启后为什么还能用？ | `extra_ros_packages/leap_interfaces/srv/`、`microros_services.cpp`、`main/config/pid_config.cpp` | 从服务请求找到保存参数的位置，再回启动函数找到重新加载的位置。 |
-| MAVLink 和 micro-ROS 两种指令如何共用电机控制？ | `app_runtime.cpp` 的 `start_comm_task()`、`main/tasks/network/mavlink/mavlink_common.cpp`、`doc/protocols.md` | 选一条 MAVLink 速度指令，找到它在哪里与阶段 3 的 ROS 路径汇合，再指出两者各自处理协议的文件。 |
+| 1 | 板子开机，项目自己写的第一段应用代码在哪？ | C/C++ 函数、头文件、声明与调用 |
+| 2 | ESP32 的一个引脚，怎么在代码里变成“超声波传感器”？ | GPIO、类、对象、构造与初始化 |
+| 3 | 距离是谁测的？其他任务怎么拿到读数？ | 结构体、FreeRTOS 任务、队列、按值复制 |
+| 4 | 板子里的厘米数，怎样成为电脑可订阅的 ROS 话题？ | 发布者、消息类型、时间戳、micro-ROS |
+| 5 | 反过来，电脑发来的速度指令在哪几行被底盘接收？ | 订阅、指针、命令与状态、任务分工 |
+| 6 | 电机控制器怎样把目标变成实际输出？ | 编码器、闭环、PWM、硬件驱动 |
+| 7 | Linux 上是谁接走板子发回的里程计？ | 可执行文件、进程、ROS 节点、回调与 launch |
 
-想验证雷达和时间同步，可以在仓库根目录分别运行对应的主机测试。雷达测试使用 `g++`；时间同步的命令还用到 CMake 和 CTest。它们用测试数据模拟外设输入与时钟行为。
+## 1　找到固件应用入口｜第一次只读三个位置
 
-```bash
-bash tests/run_lidar_tests.sh
+**① 第一段只有几行。** 打开 [main/app_main.cpp · 1–5 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/app_main.cpp#L1-L5)。
 
-cmake -S tests -B /tmp/leap-time-sync-tests
-cmake --build /tmp/leap-time-sync-tests
-ctest --test-dir /tmp/leap-time-sync-tests --output-on-failure
+```cpp
+#include "app_runtime.h"
+
+extern "C" void app_main(void) {
+    app_runtime_startup();
+}
 ```
 
-## 阶段 7　验收，准备迁移到自己的车
+- `#include "app_runtime.h"` 把头文件里的声明引入当前源文件，第 4 行由此知道有这样一个函数可以调用。
+- `void app_main(void)` 的前一个 `void` 表示没有返回值，括号里的 `void` 表示没有参数。ESP-IDF 完成前面的系统启动后，由主任务调用这个应用入口。
+- `extern "C"` 让这个 C++ 文件里的入口使用 C 语言链接约定，让框架能按约定的名字找到它。
+- `app_runtime_startup();` 是一次函数调用。到这里，你已经知道下一步该搜哪个名字。[ESP-IDF 启动说明](https://github.com/espressif/esp-idf/blob/v5.3/docs/en/api-guides/startup.rst)
 
-先合上这份指南，用源码回答三道题。
+**② 看同一个名字在两个文件里有什么区别。** [main/app_runtime.h · 9–10 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/app_runtime.h#L9-L10) 的函数名后面直接跟分号，告诉调用者“有这个函数”。[main/app_runtime.cpp · 170–180 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/app_runtime.cpp#L170-L180) 的函数名后跟花括号，里面才是执行步骤。第一段还有个能提前返回的 `if`，作用是避免重复启动。
 
-- [ ] **讲一次完整运动。** 输入为 `linear.x = 0.2`、`angular.z = 1.0`。写下 ROS 消息、板内指令、左右轮目标、编码器、PWM、里程计分别出现在哪个文件。能说清哪些是目标值，哪些来自测量。
-- [ ] **查一次故障。** 上位机一直发前进指令，两个轮子都不动。按你会实际检查的顺序列三个观察点，例如回调是否收到消息、运动任务是否选中了这条命令、最终 PWM 是否为零。每个观察点旁写下“若正常，我下一步看哪里”。
-- [ ] **说明一个改动会传到哪里。** 假设把“每圈编码器计数”填成实际值的两倍。用阶段 4 的数字算出轮速读数会减半，再说明这会怎样影响速度反馈和里程计。能做到这一项，就已经在用源码推理。
+**③ 只圈三个动作。** 在 [main/app_runtime.cpp · 182–199 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/app_runtime.cpp#L182-L199) 找 `board_init()`、`create_runtime_queues()`、`xTaskCreate(ultrasonic_task, ...)`。先把它们译成“准备硬件”“准备任务间传数据的地方”“创建测距任务”。今天读到第 199 行就可以关掉文件。
 
-最后带着源码去看你的三轮车：在纸上标出每只轮子有没有电机、能否主动转向、有没有编码器。如果是“左右两个驱动轮＋被动支撑轮”，可以沿用刚学的差速公式，先核对驱动芯片、引脚、轮径、轮距、编码器方向与每圈计数。如果是舵机转向或三个全向轮，保留 ROS 消息与任务组织的思路，重新推导底盘运动学。你可以等到能画出自己底盘的轮子布局，再进入这一阶段。
+**可以继续**：能说出“框架调用谁，它又调用谁”，还能指出函数**声明**和**定义**分别在哪个文件。三个启动动作里，第 2 节先展开 `board_init()`。
 
-## 读到哪里就记到哪里
+## 2　从引脚读到对象｜C++ 在这里解决什么问题
 
-每次读完，用三行写下今天能证明的事情。比如：
+这节只追超声波传感器。它有两根信号线，TRIG 发出触发脉冲，ECHO 返回一段脉冲，脉冲时长用于计算距离。
 
-```text
-今天的问题：0.2 m/s 在哪里变成 200 mm/s？
-代码证据：handle_cmd_vel() 把 linear.x 乘 1000，写入 MotionMsg.target_vx。
-接下来查：motion_task 何时读取 motion_cmd，谁会临时接管这条命令？
-```
+1. **引脚怎么命名？** [main/config/board_config.h · 22–23 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/config/board_config.h#L22-L23) 给 GPIO21 和 GPIO47 起了有用途的名字。读到 `constexpr`，先理解为“编译时已确定的值”。这样其他文件可以写“超声波触发引脚”，接线信息集中在一处。
+2. **对象能做什么？** [components/ultrasonic_sensor/ultrasonic_sensor.h · 10–26 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/components/ultrasonic_sensor/ultrasonic_sensor.h#L10-L26) 定义了 `UltrasonicSensor` 类。`public` 下的构造函数接收两根引脚，`Init()` 初始化外设，`GetDistanceCm(...)` 返回厘米数；`private` 下保存对象自己的引脚等状态。把这个头文件读成一张可调用功能表。
+3. **具体是哪一个传感器？** [main/platform/board.cpp · 19–21 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/platform/board.cpp#L19-L21) 的 `UltrasonicSensor ultrasonic(...)` 用刚才那两个引脚创建名为 `ultrasonic` 的对象。再看 [main/platform/board.cpp · 27–36 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/platform/board.cpp#L27-L36)，`board_init()` 调用 `ultrasonic.Init()` 来初始化硬件。这里同时能看清“创建对象”和“启动这块外设”是两个动作。
 
-时间少时，只追一个变量、记下一个函数，就可以在这里停。下次从“接下来查”继续。
+**可以继续**：遮住右侧注释，指出 `UltrasonicSensor`、`ultrasonic`、`GetDistanceCm()` 中哪个是类型、哪个是代表具体设备的对象、哪个是它提供的方法。下一节会看到谁用这个对象。
+
+## 3　读一个完整的小任务｜FreeRTOS 和队列
+
+**先读数据，再读任务。** [main/msg/ultrasonic_msg.h · 4–7 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/msg/ultrasonic_msg.h#L4-L7) 的 `struct` 把相关字段放进一个类型。`float distance_cm` 装距离。打开 [main/tasks/sensors/ultrasonic_task.cpp · 5–13 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/tasks/sensors/ultrasonic_task.cpp#L5-L13)，从头到尾只追下面四个动作。
+
+| 位置 | 读成一句人话 |
+|---|---|
+| 第 6 行 `UltrasonicMsg msg;` | 创建一份这个任务用来装读数的消息。 |
+| 第 7–8 行 `while (1)`、`ultrasonic.GetDistanceCm(25.0f)` | 任务反复向刚才的对象取距离，并把结果写进 `msg.distance_cm`。按方法声明，25 是温度参数，表示本次用 25℃ 做声速补偿。 |
+| 第 10 行 `xQueueOverwrite(..., &msg)` | 把这份消息写进队列。`&msg` 给出源数据的地址，队列按创建时设置的大小复制内容。 |
+| 第 11 行 `vTaskDelay(...100...)` | 当前任务等待约 100 ms，其他就绪任务可以运行。一次循环还包括测距所花的时间。 |
+
+**现在回头读创建代码。** [main/app_runtime.cpp · 152–156 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/app_runtime.cpp#L152-L156) 中，`xQueueCreate(1, sizeof(UltrasonicMsg))` 指定只存一条，每条占一个消息结构体的大小。[main/app_runtime.cpp · 193–198 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/app_runtime.cpp#L193-L198) 的 `xTaskCreate(ultrasonic_task, ...)` 将函数作为任务入口交给调度器。启动函数还能继续创建电机等其他任务。最新距离来了就覆盖那一个位置，发布端稍后取走一份当前读数，采集和发送各按自己的节奏工作。
+
+**可以继续**：说明 `ultrasonic_task` 为什么可以一直循环，`app_runtime_startup()` 仍能往下走。然后回答“先测到 30 cm，又测到 31 cm，发布任务这时才来读，会读到哪个值？”
+
+**想看硬件底层时再展开**：[GetDistanceCm 的触发与等待](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/components/ultrasonic_sensor/ultrasonic_sensor.cpp#L121-L141) 翻转 TRIG 引脚并等待通知；[回波中断中的边沿与通知](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/components/ultrasonic_sensor/ultrasonic_sensor.cpp#L74-L100) 记录回波的起止边沿，再通知等结果的任务。这里是理解“外设事件、中断、任务”三者关系的一个实物例子。
+
+## 4　把 45 cm 追到 ROS 话题｜第一条完整数据流
+
+假设板子刚测到 45 cm。**话题**是双方约定的数据流名称，**消息类型**规定这一条数据有哪些字段，**发布者**负责把填好的消息发出去。
+
+1. [main/tasks/network/microros/microros_runtime.cpp · 134–141 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/tasks/network/microros/microros_runtime.cpp#L134-L141) 创建发布者。找到三个信息就停：它属于 `s_node`、使用 `sensor_msgs/msg/Range` 类型、使用 `kUltrasonicTopic` 这个名字。[main/config/ros_config.h · 23–29 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/config/ros_config.h#L23-L29) 里能找到名字 `ultrasonic`。项目使用的完整话题名是 `/ultrasonic`。
+2. [main/tasks/network/microros/microros_publishers.cpp · 175–187 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/tasks/network/microros/microros_publishers.cpp#L175-L187) 是最值得逐行读的十几行。`xQueuePeek` 读取并保留队列里的值；`set_stamp` 填时间戳；`distance_cm / 100.0f` 把 45 cm 变成 0.45 m；`rcl_publish` 发布消息。这里的局部变量 `ultrasonic` 装着一份读数，它的类型是 `UltrasonicMsg`。第 2 节的同名对象类型是 `UltrasonicSensor`，看声明就能分清。
+3. **谁决定什么时候发？** 同文件 [196–206 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/tasks/network/microros/microros_publishers.cpp#L196-L206)。定时回调先检查同步时间，再按计数决定这一轮是否发布超声波。上一节的采集任务只负责更新读数。
+
+**可以继续**：用自己的话讲完“GPIO 对应的传感器 → 采集任务 → 单槽队列 → ROS 发布者 → 电脑可订阅的距离”。顺便指出消息在哪里从厘米变成米。现在已经读通这个工程的一项完整功能。
+
+## 5　反方向读速度指令｜ROS 订阅和板内消息
+
+换方向看。上位机向 `/cmd_vel` 发布 `Twist`，其中 `linear.x` 表示前进速度，`angular.z` 表示转向角速度。这次只跟 `linear.x`，一直跟到 `robot.Drive()`。
+
+1. **看到什么消息，会叫谁来处理？** [microros_runtime.cpp · 154–163 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/tasks/network/microros/microros_runtime.cpp#L154-L163) 建立 `Twist` 订阅；同文件 [372–379 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/tasks/network/microros/microros_runtime.cpp#L372-L379) 取出一条消息，交给 `handle_cmd_vel()`。
+2. **逐行读一次消息转换。** [main/tasks/network/microros/microros_subscribers.cpp · 5–18 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/tasks/network/microros/microros_subscribers.cpp#L5-L18)。参数 `const ... *msg` 是指向只读输入消息的指针，`msg->linear.x` 读取其中的字段。`cmd` 是本地创建的对象，所以写成 `cmd.target_vx`。0.2 m/s 被换成 200 mm/s，再通过 `motion_cmd` 队列交给运动任务。可以回 [MotionMsg · 16–27 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/msg/motion_msg.h#L16-L27) 看目标字段与当前状态字段。
+3. **到哪一行开始控制车？** [motion_task.cpp · 49–64 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/tasks/control/motion_task.cpp#L49-L64) 取出指令、在导航与手柄指令间选择。先按手柄没有接管来读，再向上跳到 [同文件 27–32 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/tasks/control/motion_task.cpp#L27-L32)。`control_mode == 0` 时，进入 `robot.Drive(...)`。`auto apply_command = [&](...)` 是函数内部定义的一小段可调用代码，初读时把它叫作“执行所选指令”就够了。
+
+**可以继续**：能指出“接收外部消息”和“决定现在执行哪条命令”分别在哪个函数。这样设计的效果是，通信层负责消息格式，运动任务可以统一处理不同来源的命令。
+
+## 6　追到真实的电机｜控制器、驱动和反馈
+
+先看接口的分工。此处只要知道运动学把车身目标换成左右轮目标，公式可以以后再读。建议分两次看。
+
+**第一次，只追输出。** [board.cpp · 13–19 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/platform/board.cpp#L13-L19) 把两个电机和两个编码器交给控制器 `robot`。[motion_controller.cpp · 105–121 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/control/motion_controller.cpp#L105-L121) 的 `Drive()` 接下目标，并经 `CalculateKinematics()` 存成目标轮速。在 [motion_task.cpp · 82–92 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/tasks/control/motion_task.cpp#L82-L92) 看见运动任务反复调用 `robot.Update(...)`。跳到 [Update() · 254–266 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/control/motion_controller.cpp#L254-L266)，找到 PID 的输出、死区补偿和最终的 `SetSpeed(final_pwm)`。最后打开 [motor_driver.cpp · 55–82 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/components/motor_driver/motor_driver.cpp#L55-L82)，看到正负号决定哪路输出 PWM。PWM 通过改变一个周期里输出有效的时间比例来调节驱动。这个 `SetSpeed` 参数实际装的是带方向的驱动量，读函数体比只凭名字猜更准确。
+
+**第二次，只追反馈。** [encoder_driver.cpp · 78–87 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/components/encoder_driver/encoder_driver.cpp#L78-L87) 从 ESP32 的脉冲计数外设读数。回 [Update() · 131–141 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/control/motion_controller.cpp#L131-L141)，找到“本次计数减上次计数”、换成实际 RPM、滤波三个动作。再看 [pid_controller.cpp · 21–28 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/components/pid_controller/pid_controller.cpp#L21-L28) 的 `error = setpoint - measured_value`。轮子受阻后，同样的目标对应不同的实测速度，控制器因此有依据调整输出。这就是这里引入反馈的理由。
+
+**可以继续**：用“目标轮速、编码器实测轮速、PWM”三个词解释两件事：控制器拿什么比较？电机驱动实际收到什么？能答出来即可继续到 Linux 上位机。
+
+## 7　跨到 Linux｜同一条里程计由谁接收
+
+本节点开的链接会进入配套的 **chuyun_ws 上位机仓库**。你可以继续用 Windows 浏览。跟着同一条 `/odom` 看两端，能把 Linux 进程、ROS 节点、消息回调和板上的 FreeRTOS 任务区分开。
+
+1. **板上从哪里发？** [固件 motion_task.cpp · 94–107 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/tasks/control/motion_task.cpp#L94-L107) 把实际运动状态写入 `motion_state`。[固件 publish_odom() · 95–113 行](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/tasks/network/microros/microros_publishers.cpp#L95-L113) 取出状态，填位置、方向和速度，发布里程计。micro-ROS Agent 连接板端和上位机的 ROS 2 通信。
+2. **Linux 启动哪个程序？** [上位机 launch 文件 · 48–64 行](https://github.com/czu963889306-dev/chuyun_ws/blob/8043c442ee41c3beb62572502ae071a0ed75b238/chuyun_bringup/launch/chuyun_bringup.launch.py#L48-L64) 里，`executable='ekf_input_adapter'` 指定可执行程序。再看 [上位机 CMakeLists.txt · 38–44 行](https://github.com/czu963889306-dev/chuyun_ws/blob/8043c442ee41c3beb62572502ae071a0ed75b238/chuyun_bringup/CMakeLists.txt#L38-L44)，同名程序由 `src/ekf_input_adapter.cpp` 构建。可以把两个文件接成一句话：“这个 launch 配置要启动的，就是这份 C++ 源码构成的程序。”
+3. **程序怎么持续接收消息？** [上位机 ekf_input_adapter.cpp · 88–94 行](https://github.com/czu963889306-dev/chuyun_ws/blob/8043c442ee41c3beb62572502ae071a0ed75b238/chuyun_bringup/src/ekf_input_adapter.cpp#L88-L94) 是 Linux 应用的 `main()`。`rclcpp::init` 初始化 ROS 2，`make_shared<EkfInputAdapter>()` 创建节点对象，`spin` 等待并处理事件。这一例里，一个 Linux 进程运行着这个 ROS 节点。
+4. **收到一条消息后做什么？** 同文件 [39–58 行](https://github.com/czu963889306-dev/chuyun_ws/blob/8043c442ee41c3beb62572502ae071a0ed75b238/chuyun_bringup/src/ekf_input_adapter.cpp#L39-L58) 先创建发布者，再订阅 `/odom`。消息到达时，`[this](...){...}` 里的代码被执行。它复制消息、修改子坐标系名称和测量不确定度，再向 `/odom/ekf_input` 发布。后续的 EKF 节点用这些输入做状态估计，适配器本身负责整理输入。
+
+**可以继续**：试着给三个名字各写一行注释。FreeRTOS 的 `motion_task` 是板上调度的任务；Linux 的 `ekf_input_adapter` 可执行程序启动后形成进程；进程里的 ROS 节点注册订阅并处理消息。项目在这一层能教你 Linux 应用是怎样组织与启动的。
+
+**想再读一点 Linux 系统接口**：[上位机 Wi-Fi 配置程序 · 68–71 行](https://github.com/czu963889306-dev/chuyun_ws/blob/8043c442ee41c3beb62572502ae071a0ed75b238/chuyun_wifi_config/chuyun_wifi_config/wifi_config_applier.py#L68-L71)。只看 `subprocess.run(...)`：这个 ROS 应用可以启动系统工具 `nmcli` 来查询网络连接，并读回输出。这样就把“使用 ROS API”和“使用操作系统提供的程序”对应到了两段真实代码。
+
+## 主线读完后的几个分支
+
+按兴趣选一条。每一行都对应前面已经读过的一项设计。
+
+| 想了解 | 打开哪里 | 带走什么 |
+|---|---|---|
+| 工程怎么拼成固件 | [根目录 CMakeLists.txt](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/CMakeLists.txt#L1-L4)，再看 [main/CMakeLists.txt](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/CMakeLists.txt#L31-L45) | 从项目名称、源文件列表和头文件搜索目录，认出前面读过的模块怎样进入同一工程。 |
+| UART、Wi-Fi UDP 和 micro-ROS 的关系 | [setup_udp_transport / setup_uart_transport](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/tasks/network/microros/microros_transport.cpp#L181-L214) | 两种传输分别注册打开、关闭、读、写函数。上层仍能发布同一种 ROS 消息。 |
+| ROS 服务与断电保存 | [SetSpeedPid.srv](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/extra_ros_packages/leap_interfaces/srv/SetSpeedPid.srv#L1-L8) → [设置 PID 的服务](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/tasks/network/microros/microros_services.cpp#L31-L57) → [保存参数](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/config/pid_config.cpp#L52-L64) | `.srv` 的横线上方是请求、下方是响应；服务处理代码同时涉及运行时参数和写入 ESP32 的 NVS 非易失存储。 |
+| I²C 传感器和雷达状态机 | [IMU 的 I²C 与雷达的 UART 引脚](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/config/board_config.h#L33-L37)、[IMU 采集任务](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/tasks/sensors/imu_task.cpp#L11-L24)、[雷达识别状态更新](https://github.com/czu963889306-dev/leap_ros_mcu_driver/blob/806d2fa02de9085c8ef413f59dc9e421c88d51f5/main/tasks/sensors/lidar_detection.h#L21-L39) | 比较周期读取传感器与持续等待串口数据的两种处理思路。雷达着重看“探测、识别、超时后重新探测”。 |
+
+## 卡住时，怎样问 AI
+
+复制**当前函数和路径**，再说具体卡在哪个词。对着源码一次解决一个疑问，答案更容易核对。
+
+> 我在 Windows 上静态阅读 `leap_ros_mcu_driver`，刚学到第 3 节。下面是 `main/tasks/sensors/ultrasonic_task.cpp` 第 5–13 行。我已经理解循环会反复测距，现在卡在 `xQueueOverwrite(..., &msg)`。请结合这段代码解释：为什么传地址？队列保存的究竟是什么？要判断这一点，我下一步只需要看哪一处源码？先讲这段，不用给运行命令。
+
+如果 AI 的解释还太抽象，继续问“请把这个名字指给我看，它在本段哪一行被创建、哪一行被使用？”每次结束只记一句：**我能解释哪一行，下次从哪个函数接着读。**
