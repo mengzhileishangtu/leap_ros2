@@ -170,7 +170,7 @@ static void create_runtime_queues(void) {
 void app_runtime_startup(void) {
     if (s_runtime_started) {
         return;
-    }
+    }//检查是否已经启动
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
